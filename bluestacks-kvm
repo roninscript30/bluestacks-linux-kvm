@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CMD="${1:-help}"
+shift || true
+
+case "${CMD}" in
+    build)
+        exec "${ROOT_DIR}/scripts/build.sh" "$@"
+        ;;
+    install)
+        exec "${ROOT_DIR}/scripts/install.sh" "$@"
+        ;;
+    run|launch)
+        exec "${ROOT_DIR}/scripts/launch.sh" "$@"
+        ;;
+    tune)
+        exec "${ROOT_DIR}/scripts/guest-tune.sh" "$@"
+        ;;
+    status)
+        echo "=== KVM Bridge Log (/tmp/whv_kvm.log) ==="
+        tail -n 20 /tmp/whv_kvm.log 2>/dev/null || echo "No active log."
+        echo
+        echo "=== NVIDIA GPU Processes ==="
+        nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv,noheader 2>/dev/null || true
+        ;;
+    *)
+        echo "Usage: ./bluestacks-kvm {build|install|run|tune|status}"
+        exit 1
+        ;;
+esac
