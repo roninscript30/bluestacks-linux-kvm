@@ -1819,8 +1819,39 @@ run_again:
                         } else if (off == 0x0e0U) {
                             *(uint32_t *)(xapic + 0x0e0U) = val | 0x0fffffffU;
                             goto run_again;
-                        } else if (off == 0x080U && (val & 0xffffff00U) == 0U && (uint8_t)val == xapic[0x80U]) {
-                            goto run_again;
+                        } else if (off == 0x080U && (val & 0xffffff00U) == 0U) {
+                            uint8_t new_tpr = (uint8_t)val;
+                            uint8_t old_tpr = xapic[0x80U];
+                            if (new_tpr == old_tpr) {
+                                goto run_again;
+                            }
+                            uint8_t *pib = *(uint8_t * const *)(pVCpu + 0xfd48);
+                            int no_pending = (*(const uint64_t *)(pVCpu + 0xfd60) == 0ULL &&
+                                              *(const uint64_t *)(pVCpu + 0xfd68) == 0ULL &&
+                                              *(const uint32_t *)(pVCpu + 0xfd70) == 0U &&
+                                              pib != NULL && *(const uint32_t *)(pib + 0x20U) == 0U);
+                            if (no_pending) {
+                                uint32_t irr_any = 0;
+                                for (int i = 0; i < 8; i++) {
+                                    irr_any |= *(const uint32_t *)(xapic + 0x200U + (uint32_t)i * 0x10U);
+                                }
+                                if (irr_any == 0U || (new_tpr & 0xf0U) >= (old_tpr & 0xf0U)) {
+                                    xapic[0x80U] = new_tpr;
+                                    uint32_t cur_isrv = 0;
+                                    for (int i = 7; i >= 0; i--) {
+                                        uint32_t v = *(const uint32_t *)(xapic + 0x100U + (uint32_t)i * 0x10U);
+                                        if (v != 0U) {
+                                            cur_isrv = ((uint32_t)i << 5) | (31U - (uint32_t)__builtin_clz(v));
+                                            break;
+                                        }
+                                    }
+                                    uint8_t isr_prio = (uint8_t)(cur_isrv & 0xf0U);
+                                    xapic[0xa0U] = ((new_tpr & 0xf0U) >= isr_prio) ? new_tpr : isr_prio;
+                                    run->cr8 = (uint64_t)(new_tpr >> 4);
+                                    run->s.regs.sregs.cr8 = (uint64_t)(new_tpr >> 4);
+                                    goto run_again;
+                                }
+                            }
                         } else if (off == 0x0b0U && val == 0U &&
                                    (*(const uint32_t *)(xapic + 0xf0U) & 0x100U) != 0U &&
                                    (*(const uint32_t *)(xapic + 0x350U) & 0x4000U) == 0U &&
@@ -1914,6 +1945,9 @@ run_again:
             run->immediate_exit = 1;
             sys_ioctl(vcpu->fd, KVM_RUN, 0);
             run->immediate_exit = 0;
+            if (!is_write && msr_idx == 0xc0010015U) {
+                goto run_again;
+            }
             fill_vp_context(vcpu, vp_ctx, 2, 1, &regs, &sregs);
             /* Restore RIP to before the 2-byte RDMSR/WRMSR instruction so BstkVMM can advance it by 2 */
             vp_ctx->Rip -= 2;

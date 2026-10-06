@@ -47,11 +47,15 @@ setprop bst.fps 240
 
 for pfile in /data/bluestacks.prop /data/.bluestacks.prop; do
     if [ -f "$pfile" ]; then
-        sed -i "s/^ro.product.model=.*/ro.product.model=ASUS_Z01QD/" "$pfile"
-        sed -i "s/^ro.product.brand=.*/ro.product.brand=asus/" "$pfile"
-        sed -i "s/^ro.product.name=.*/ro.product.name=WW_I001D/" "$pfile"
-        sed -i "s/^ro.product.device=.*/ro.product.device=ASUS_I001_1/" "$pfile"
-        sed -i "s/^ro.product.manufacturer=.*/ro.product.manufacturer=asus/" "$pfile"
+        cp "$pfile" /data/local/tmp/bstprop.tmp
+        sed -i "s/^ro.product.model=.*/ro.product.model=ASUS_Z01QD/" /data/local/tmp/bstprop.tmp
+        sed -i "s/^ro.product.brand=.*/ro.product.brand=asus/" /data/local/tmp/bstprop.tmp
+        sed -i "s/^ro.product.name=.*/ro.product.name=WW_I001D/" /data/local/tmp/bstprop.tmp
+        sed -i "s/^ro.product.device=.*/ro.product.device=ASUS_I001_1/" /data/local/tmp/bstprop.tmp
+        sed -i "s/^ro.product.manufacturer=.*/ro.product.manufacturer=asus/" /data/local/tmp/bstprop.tmp
+        cat /data/local/tmp/bstprop.tmp > "$pfile"
+        chmod 644 "$pfile"
+        rm -f /data/local/tmp/bstprop.tmp
     fi
 done
 
@@ -60,13 +64,26 @@ settings put global transition_animation_scale 0.0
 settings put global animator_duration_scale 0.0
 
 for pkg in com.dts.freefireth com.dts.freefiremax; do
-    pref="/data/data/${pkg}/shared_prefs/${pkg}.v2.playerprefs.xml"
-    if [ -f "$pref" ]; then
-        if grep -q 'name="HighFPS"' "$pref"; then
-            sed -i 's/<int name="HighFPS" value="[0-9]*" \/>/<int name="HighFPS" value="1" \/>/' "$pref"
-        else
-            sed -i 's/<\/map>/    <int name="HighFPS" value="1" \/>\n<\/map>/' "$pref"
+    pdir="/data/data/${pkg}/shared_prefs"
+    pref="${pdir}/${pkg}.v2.playerprefs.xml"
+    if [ -d "$pdir" ] && [ -f "$pref" ]; then
+        owner_uid="$(stat -c %u "/data/data/${pkg}" 2>/dev/null || echo "")"
+        owner_gid="$(stat -c %g "/data/data/${pkg}" 2>/dev/null || echo "")"
+        cp "$pref" /data/local/tmp/ffpref.tmp
+        for key in SmoothHighFrame StandardHighFrame HighFPS UltraHighFrame; do
+            if grep -q "name=\"${key}\"" /data/local/tmp/ffpref.tmp; then
+                sed -i "s/<int name=\"${key}\" value=\"[0-9]*\" \/>/<int name=\"${key}\" value=\"1\" \/>/" /data/local/tmp/ffpref.tmp
+            else
+                sed -i "s/<\/map>/    <int name=\"${key}\" value=\"1\" \/>\n<\/map>/" /data/local/tmp/ffpref.tmp
+            fi
+        done
+        cat /data/local/tmp/ffpref.tmp > "$pref"
+        rm -f /data/local/tmp/ffpref.tmp
+        if [ -n "$owner_uid" ] && [ -n "$owner_gid" ]; then
+            chown "${owner_uid}:${owner_gid}" "$pref" 2>/dev/null || true
         fi
+        chmod 660 "$pref" 2>/dev/null || true
+        restorecon "$pref" 2>/dev/null || true
     fi
 done
 EOF
