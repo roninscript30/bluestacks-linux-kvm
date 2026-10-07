@@ -1923,7 +1923,32 @@ run_again:
         }
         case KVM_EXIT_HLT: {
             g_stat_hlt++;
-            fill_vp_context(vcpu, vp_ctx, 1, 1, NULL, NULL);
+            uint8_t *pVCpu = (uint8_t *)vcpu->vbox_vcpu;
+            if (pVCpu != NULL) {
+                uint8_t *pib = *(uint8_t * const *)(pVCpu + 0xfd48);
+                for (int spin = 0; spin < 128; spin++) {
+                    if (vcpu->cancel_requested ||
+                        (*(const volatile uint64_t *)pVCpu & 0xf5fULL) != 0ULL ||
+                        *(const volatile uint64_t *)(pVCpu + 0xfd60) != 0ULL ||
+                        *(const volatile uint32_t *)(pVCpu + 0xfd70) != 0U ||
+                        (pib != NULL && *(const volatile uint32_t *)(pib + 0x20U) != 0U)) {
+                        break;
+                    }
+                    __asm__ volatile("pause" ::: "memory");
+                }
+                /*
+                 * CRITICAL FIX for 64-bit Linux kernels (Pie64 / Android 11):
+                 * In BstkVMM.dll's nemR3WinHandleExit (0x18020e162), case 8
+                 * (WHvRunVpExitReasonX64Halt) returns VINF_EM_HALT (0x458) WITHOUT
+                 * calling nemHCWinCopyStateFromVpContext (0x18020da40)!
+                 * If another register in pVCpu+0x19150 is dirtied while halted,
+                 * VirtualBox syncs the stale pre-HLT RIP back into KVM on the next
+                 * entry, causing the guest to re-execute HLT inside calibrate_APIC_clock()!
+                 */
+                *(uint64_t *)(pVCpu + 0x19140) = run->s.regs.regs.rip;
+                *(uint32_t *)(pVCpu + 0x19148) = (uint32_t)run->s.regs.regs.rflags;
+            }
+            fill_vp_context(vcpu, vp_ctx, 0, 1, NULL, NULL);
             *(uint32_t *)exit_buf = 8U; /* WHvRunVpExitReasonX64Halt */
             return 0;
         }

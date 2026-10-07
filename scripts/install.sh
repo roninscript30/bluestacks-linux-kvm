@@ -120,6 +120,10 @@ if [[ -d "${BST_PROG_DIR}" ]]; then
 fi
 
 # 8. Auto-detect all instances in bluestacks.conf & apply 240 FPS + ROG 2 + PGA/GL config
+# Stop any running BlueStacks / VirtualBox COM daemon first so .bstk edits are not overwritten in memory
+pkill -9 -f "HD-Player.exe|BstkSVC.exe|HD-MultiInstanceManager.exe|HD-Adb.exe|HD-GLCheck.exe" 2>/dev/null || true
+/usr/lib/x86_64-linux-gnu/wine/wineserver -k 2>/dev/null || wineserver -k 2>/dev/null || true
+
 set_conf_key() {
     local key="$1"
     local val="$2"
@@ -139,6 +143,16 @@ if [[ -f "${BST_CONF}" ]]; then
     set_conf_key "bst.enable_adb_access" "1" "${BST_CONF}"
     set_conf_key "bst.feature.rooting" "1" "${BST_CONF}"
     set_conf_key "bst.prefer_dedicated_gpu" "1" "${BST_CONF}"
+    set_conf_key "bst.enable_image_detection" "0" "${BST_CONF}"
+    set_conf_key "bst.enable_ai_highlights" "0" "${BST_CONF}"
+    set_conf_key "bst.enable_auto_upload_recording" "0" "${BST_CONF}"
+    set_conf_key "bst.enable_discord_integration" "0" "${BST_CONF}"
+    set_conf_key "bst.enable_programmatic_ads" "0" "${BST_CONF}"
+    set_conf_key "bst.feature.programmatic_ads" "0" "${BST_CONF}"
+    set_conf_key "bst.feature.show_moments" "0" "${BST_CONF}"
+    set_conf_key "bst.feature.auto_upload_nowgg_moments" "0" "${BST_CONF}"
+    set_conf_key "bst.feature.auto_upload_nowgg_recording" "0" "${BST_CONF}"
+    set_conf_key "bst.mem_opt_mode" "0" "${BST_CONF}"
 
     # Find all configured instances (e.g., Nougat32, Nougat64, Pie64, Rvc64)
     mapfile -t INSTANCES < <(grep -oE '^bst\.instance\.[^.]+\.' "${BST_CONF}" | cut -d. -f3 | sort -u)
@@ -150,18 +164,33 @@ if [[ -f "${BST_CONF}" ]]; then
         echo "[*] Applying 240 FPS + ASUS ROG 2 + PGA/GL configuration to instance: ${inst}..."
         set_conf_key "bst.instance.${inst}.enable_root_access" "1" "${BST_CONF}"
         set_conf_key "bst.instance.${inst}.cpus" "4" "${BST_CONF}"
-        set_conf_key "bst.instance.${inst}.ram" "3072" "${BST_CONF}"
+        set_conf_key "bst.instance.${inst}.ram" "4096" "${BST_CONF}"
         set_conf_key "bst.instance.${inst}.device_profile_code" "rogt" "${BST_CONF}"
         set_conf_key "bst.instance.${inst}.enable_high_fps" "1" "${BST_CONF}"
         set_conf_key "bst.instance.${inst}.max_fps" "240" "${BST_CONF}"
         set_conf_key "bst.instance.${inst}.enable_vsync" "0" "${BST_CONF}"
+        set_conf_key "bst.instance.${inst}.enable_fps_display" "1" "${BST_CONF}"
         set_conf_key "bst.instance.${inst}.graphics_engine" "pga" "${BST_CONF}"
         set_conf_key "bst.instance.${inst}.graphics_renderer" "gl" "${BST_CONF}"
-        set_conf_key "bst.instance.${inst}.astc_decoding_mode" "disabled" "${BST_CONF}"
+        set_conf_key "bst.instance.${inst}.vulkan_supported" "0" "${BST_CONF}"
+        set_conf_key "bst.instance.${inst}.camera_backend" "" "${BST_CONF}"
+        set_conf_key "bst.instance.${inst}.camera_device" "" "${BST_CONF}"
+        set_conf_key "bst.instance.${inst}.astc_decoding_mode" "software" "${BST_CONF}"
         set_conf_key "bst.instance.${inst}.fb_width" "1600" "${BST_CONF}"
         set_conf_key "bst.instance.${inst}.fb_height" "900" "${BST_CONF}"
         set_conf_key "bst.instance.${inst}.dpi" "240" "${BST_CONF}"
     done
+fi
+
+# Strip restrictive HostCPUID/00000001/ecx=0x201 mask and ensure RealTSCOffset in VirtualBox .bstk configs
+ENGINE_DIR="${WINEPREFIX}/drive_c/ProgramData/BlueStacks_nxt/Engine"
+if [[ -d "${ENGINE_DIR}" ]]; then
+    while IFS= read -r -d '' bstk_file; do
+        sed -i '/HostCPUID\/00000001\/ecx/d' "${bstk_file}" 2>/dev/null || true
+        if ! grep -q 'VBoxInternal/TM/TSCMode' "${bstk_file}" 2>/dev/null; then
+            sed -i 's|<ExtraData>|<ExtraData>\n      <ExtraDataItem name="VBoxInternal/TM/TSCMode" value="RealTSCOffset"/>|' "${bstk_file}" 2>/dev/null || true
+        fi
+    done < <(find "${ENGINE_DIR}" -maxdepth 2 \( -name "*.bstk" -o -name "*.bstk-prev" -o -name "Android.bstk.in" \) -print0 2>/dev/null)
 fi
 
 # 9. Create Desktop Launcher

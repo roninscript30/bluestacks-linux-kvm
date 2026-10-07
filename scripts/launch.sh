@@ -21,7 +21,11 @@ fi
 BST_CONF="${WINEPREFIX}/drive_c/ProgramData/BlueStacks_nxt/bluestacks.conf"
 if [[ -z "${INSTANCE:-}" ]]; then
     if [[ -f "${BST_CONF}" ]]; then
-        INSTANCE="$(grep -oE '^bst\.instance\.[^.]+\.' "${BST_CONF}" | cut -d. -f3 | head -n 1 || echo "Nougat32")"
+        if grep -q '^bst\.instance\.Nougat32\.' "${BST_CONF}" 2>/dev/null; then
+            INSTANCE="Nougat32"
+        else
+            INSTANCE="$(grep -oE '^bst\.instance\.[^.]+\.' "${BST_CONF}" | cut -d. -f3 | head -n 1 || echo "Nougat32")"
+        fi
     else
         INSTANCE="Nougat32"
     fi

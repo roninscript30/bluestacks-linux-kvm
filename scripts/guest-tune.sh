@@ -63,27 +63,14 @@ settings put global window_animation_scale 0.0
 settings put global transition_animation_scale 0.0
 settings put global animator_duration_scale 0.0
 
-for pkg in com.dts.freefireth com.dts.freefiremax; do
-    pdir="/data/data/${pkg}/shared_prefs"
-    pref="${pdir}/${pkg}.v2.playerprefs.xml"
-    if [ -d "$pdir" ] && [ -f "$pref" ]; then
-        owner_uid="$(stat -c %u "/data/data/${pkg}" 2>/dev/null || echo "")"
-        owner_gid="$(stat -c %g "/data/data/${pkg}" 2>/dev/null || echo "")"
-        cp "$pref" /data/local/tmp/ffpref.tmp
-        for key in SmoothHighFrame StandardHighFrame HighFPS UltraHighFrame; do
-            if grep -q "name=\"${key}\"" /data/local/tmp/ffpref.tmp; then
-                sed -i "s/<int name=\"${key}\" value=\"[0-9]*\" \/>/<int name=\"${key}\" value=\"1\" \/>/" /data/local/tmp/ffpref.tmp
-            else
-                sed -i "s/<\/map>/    <int name=\"${key}\" value=\"1\" \/>\n<\/map>/" /data/local/tmp/ffpref.tmp
-            fi
-        done
-        cat /data/local/tmp/ffpref.tmp > "$pref"
-        rm -f /data/local/tmp/ffpref.tmp
-        if [ -n "$owner_uid" ] && [ -n "$owner_gid" ]; then
-            chown "${owner_uid}:${owner_gid}" "$pref" 2>/dev/null || true
-        fi
-        chmod 660 "$pref" 2>/dev/null || true
-        restorecon "$pref" 2>/dev/null || true
+# Distribute PCI-MSI IRQ affinity across VCPUs (BstkVMM's LowestPriority delivery
+# uses ASMBitLastSet(smp_affinity), which otherwise pins all IRQs to CPU3 when mask=0xf)
+if [ -f /proc/irq/27/smp_affinity ]; then
+    echo 2 > /proc/irq/27/smp_affinity 2>/dev/null
+fi
+for irq in 19 24 26; do
+    if [ -f "/proc/irq/${irq}/smp_affinity" ]; then
+        echo 1 > "/proc/irq/${irq}/smp_affinity" 2>/dev/null
     fi
 done
 EOF
@@ -92,4 +79,4 @@ EOF
 echo "[*] Pushing and executing root guest-tuning payload via bstk/su..."
 run_adb -s "${ADB_ADDR}" shell "echo ${PAYLOAD_B64} | base64 -d > /data/local/tmp/stop && chmod 755 /data/local/tmp/stop && PATH=/data/local/tmp:/system/bin /system/xbin/bstk/su root stop && rm -f /data/local/tmp/stop"
 
-echo "[+] Guest tuning applied (240Hz unlocked, TSC clocksource, pagefusion stopped, printk silenced, ASUS ROG 2 active)."
+echo "[+] Guest tuning applied (240Hz unlocked, TSC clocksource, IRQ affinity balanced, pagefusion stopped, printk silenced, ASUS ROG 2 active)."
