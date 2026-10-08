@@ -1,0 +1,3 @@
+# Build output of scripts/build.sh (rebuilt by install.sh against the installed Wine)
+/dist/
+__pycache__/
