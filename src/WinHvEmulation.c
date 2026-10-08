@@ -1,30 +1,11 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "mem_helpers.h"
+#include "winhv_unixlib.h"
 
-static inline void *sys_mmap(void *addr, size_t len, int prot, int flags, int fd, int64_t off) {
-    int64_t ret;
-    register int64_t r10 __asm__("r10") = flags;
-    register int64_t r8 __asm__("r8") = fd;
-    register int64_t r9 __asm__("r9") = off;
-    __asm__ volatile("syscall"
-                     : "=a"(ret)
-                     : "0"(9), "D"(addr), "S"(len), "d"(prot), "r"(r10), "r"(r8), "r"(r9)
-                     : "rcx", "r11", "memory");
-    return (ret < 0 && ret > -4096) ? (void *)-1 : (void *)ret;
-}
-
-static inline int64_t sys_munmap(void *addr, size_t len) {
-    int64_t ret;
-    __asm__ volatile("syscall" : "=a"(ret) : "0"(11), "D"(addr), "S"(len) : "rcx", "r11", "memory");
-    return ret;
-}
-
-static inline int64_t sys_ioctl(int fd, uint64_t req, uint64_t arg) {
-    int64_t ret;
-    __asm__ volatile("syscall" : "=a"(ret) : "0"(16), "D"(fd), "S"(req), "d"(arg) : "rcx", "r11", "memory");
-    return ret;
-}
+/* KVM_RUN re-entry goes through winhv_kvm.so: Wine traps syscall instructions in PE code. */
+__declspec(dllimport) void *__stdcall VirtualAlloc(void *address, size_t size, uint32_t type, uint32_t protect);
+__declspec(dllimport) int __stdcall VirtualFree(void *address, size_t size, uint32_t type);
 
 #define KVM_RUN          0xae80UL
 #define KVM_EXIT_IO      2
@@ -226,8 +207,9 @@ __declspec(dllexport) int32_t __cdecl WHvEmulatorCreateEmulator(
     void **Emulator)
 {
     if (!Callbacks || !Emulator) return (int32_t)0x80070057;
-    struct whv_emulator *emu = (struct whv_emulator *)sys_mmap(NULL, 4096, 3, 0x22, -1, 0);
-    if (emu == (void *)-1 || !emu) return (int32_t)0x8007000e;
+    struct whv_emulator *emu = (struct whv_emulator *)VirtualAlloc(NULL, 4096, 0x3000 /* MEM_COMMIT | MEM_RESERVE */,
+                                                                   0x04 /* PAGE_READWRITE */);
+    if (!emu) return (int32_t)0x8007000e;
     emu->Callbacks = *Callbacks;
     *Emulator = emu;
     return 0;
@@ -235,7 +217,7 @@ __declspec(dllexport) int32_t __cdecl WHvEmulatorCreateEmulator(
 
 __declspec(dllexport) int32_t __cdecl WHvEmulatorDestroyEmulator(void *Emulator) {
     if (!Emulator) return (int32_t)0x80070057;
-    sys_munmap(Emulator, 4096);
+    VirtualFree(Emulator, 0, 0x8000 /* MEM_RELEASE */);
     return 0;
 }
 
@@ -281,7 +263,8 @@ __declspec(dllexport) int32_t __cdecl WHvEmulatorTryIoEmulation(
         if (run->io.direction == KVM_EXIT_IO_IN || run->io.count > 1) {
             run->kvm_valid_regs = 0x7ULL;
             run->immediate_exit = 1;
-            int64_t r = sys_ioctl(vcpu->fd, KVM_RUN, 0);
+            struct winhv_call_params params = {{(uint64_t)(uintptr_t)vcpu}, 0};
+            int64_t r = winhv_unix_call(func_vcpu_run_once, &params);
             run->immediate_exit = 0;
             if (r == 0 && run->exit_reason == KVM_EXIT_IO) {
                 continue;
@@ -329,7 +312,8 @@ __declspec(dllexport) int32_t __cdecl WHvEmulatorTryMmioEmulation(
             __builtin_memcpy(run->mmio.data, mem.Data, mem.AccessSize);
             run->kvm_valid_regs = 0x7ULL;
             run->immediate_exit = 1;
-            int64_t r = sys_ioctl(vcpu->fd, KVM_RUN, 0);
+            struct winhv_call_params params = {{(uint64_t)(uintptr_t)vcpu}, 0};
+            int64_t r = winhv_unix_call(func_vcpu_run_once, &params);
             run->immediate_exit = 0;
             if (r == 0 && run->exit_reason == KVM_EXIT_MMIO) {
                 continue;
@@ -344,8 +328,7 @@ __declspec(dllexport) int32_t __cdecl WHvEmulatorTryMmioEmulation(
 }
 
 int __stdcall _DllMainCRTStartup(void *hinstDLL, uint32_t fdwReason, void *lpvReserved) {
-    (void)hinstDLL;
-    (void)fdwReason;
     (void)lpvReserved;
+    if (fdwReason == 1 /* DLL_PROCESS_ATTACH */ && !winhv_load_unixlib(hinstDLL)) return 0;
     return 1;
 }

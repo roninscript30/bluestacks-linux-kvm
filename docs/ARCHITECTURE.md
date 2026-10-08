@@ -10,17 +10,24 @@ BlueStacks 5 (`HD-Player.exe`) consists of two main parts running inside Wine:
 1. **The Qt Frontend & PGA Graphics Server (`HD-Player.exe`)**: Creates the window, manages user input, and runs the proprietary **PGA (Proprietary Graphics Acceleration)** server that translates Android guest GLES commands (sent over a Virtio/VMMDev shared-memory pipe) into host OpenGL calls.
 2. **The Virtual Machine Monitor (`BstkVMM.dll`)**: A heavily modified fork of VirtualBox's VMM (`NEM` - Native Execution Manager) that boots the Android x86\_64 Linux kernel (`initrd_boot.img` + `Root.vhd` + `Data.vhdx`).
 
-When `BstkVMM.dll` detects that its Windows kernel driver (`BstkDrv.sys`) is unavailable, it falls back to Microsoft's **Windows Hypervisor Platform (`WHPX`)** API by loading `WinHvPlatform.dll` and `WinHvEmulation.dll`.
+On Windows, `BstkVMM.dll` either uses its kernel driver (`BstkDrv_nxt.sys`) or, when Hyper-V is active, Microsoft's **Windows Hypervisor Platform (`WHPX`)** API through `WinHvPlatform.dll` and `WinHvEmulation.dll`. Under Wine the driver cannot run, so `install.sh` makes BlueStacks 5.22 take the WHPX path (via [`scripts/bstpatch.py`](../scripts/bstpatch.py)):
+- `HD-Player.exe` selects its Hyper-V VM path unconditionally (normally it requires CPUID leaf `0x40000000` = `Microsoft Hv`).
+- `BstkRT.dll`'s SUPLib switches to its driverless mode when the support driver cannot be opened, so `BstkVMM.dll` falls back from HM to NEM.
+- `BstkVMM.dll` skips VirtualBox's "running inside a Hyper-V partition" CPUID probe and loads `WinHvPlatform.dll` directly.
+- The `BlueStacksDrv_nxt` service runs a no-op driver ([`src/bstkdrv_stub.c`](../src/bstkdrv_stub.c)), since `HD-Player.exe` refuses to start the VM when the service cannot start.
 
-Our project provides custom implementations of those DLLs that execute **native Linux syscalls (`open`, `ioctl`, `mmap`, `clock_gettime`, `tgkill`) directly from 64-bit Windows PE code** to run the Android VM on Linux `/dev/kvm`.
+Our project provides custom implementations of those DLLs that run the Android VM on Linux `/dev/kvm`. Because Wine traps `syscall` instructions executed from Windows PE code (syscall user dispatch) and services them as NT system calls, the KVM work lives in a Linux shared library (`winhv_kvm.so`) that the PE DLLs reach through Wine unix calls, the same mechanism Wine's own DLLs use.
 
 ---
 
 ## 2. File-by-File Breakdown
 
-### `src/WinHvPlatform.c` & `src/WinHvPlatform.def`
-The core hypervisor bridge (~2,300 lines of standalone C, no libc/CRT dependencies).
-- **Direct Linux Syscall Wrapper**: Uses inline `asm volatile ("syscall")` to invoke Linux kernel system calls directly from MS-ABI functions without going through Wine's `ntdll.dll`.
+### `src/WinHvPlatform.c` & `src/winhv_unixlib.h`
+The PE side of the bridge (`WinHvPlatform.dll`). Each `WHv*` export packs its arguments into a `winhv_call_params` block and forwards it with `__wine_unix_call_dispatcher` to `winhv_kvm.so`, which it loads from its own directory with `__wine_load_unix_lib` (both from the installed Wine's `libwinecrt0.a`, so `build.sh` needs Wine's PE import libraries). `winhv_unixlib.h` holds the shared list of forwarded functions and call IDs.
+
+### `src/winhv_kvm.c`
+The core hypervisor bridge (~2,300 lines of C), built as the Linux shared library `winhv_kvm.so` and exporting only `__wine_unix_call_funcs`.
+- **libc system calls only**: Its `SIGPROF` watchdog and `SIGURG` cancel handlers can run while a thread is executing PE code, where Wine only lets syscalls made from libc's text through, so every syscall and the signal-return trampoline come from libc.
 - **Partition Lifecycle (`WHvCreatePartition`, `WHvSetupPartition`, `WHvDeletePartition`)**:
   - Opens `/dev/kvm`, calls `KVM_CREATE_VM`, configures `KVM_SET_TSS_ADDR`, and initializes an internal `whv_partition` tracking structure.
 - **Guest Physical Memory Mapping (`WHvMapGpaRange`, `WHvUnmapGpaRange`)**:
@@ -33,9 +40,9 @@ The core hypervisor bridge (~2,300 lines of standalone C, no libc/CRT dependenci
 - **Asynchronous Cancellation (`WHvCancelRunVirtualProcessor`)**:
   - Sets `run->immediate_exit = 1` and sends `SIGURG` via `SYS_tgkill` to kick a target VCPU thread out of `KVM_RUN` immediately when another VCPU or host I/O thread raises an interrupt.
 
-### `src/WinHvEmulation.c` & `src/WinHvEmulation.def`
+### `src/WinHvEmulation.c`
 Implements Microsoft's instruction emulator API (`WHvEmulatorCreateEmulator`, `WHvEmulatorTryIoEmulation`, `WHvEmulatorTryMmIoEmulation`).
-- Because `WinHvPlatform.c` already pre-decodes the guest instruction bytes and populates `IoPortAccess` / `MemoryAccess` exit contexts, `WinHvEmulation.c` acts as a zero-overhead dispatcher that invokes `BstkVMM.dll`'s registered `WHvEmulatorIoPortCallback` or `WHvEmulatorMemoryCallback` and commits read results back to the VCPU's GPRs.
+- Because `winhv_kvm.c` already pre-decodes the guest instruction bytes and populates `IoPortAccess` / `MemoryAccess` exit contexts, `WinHvEmulation.c` acts as a zero-overhead dispatcher that invokes `BstkVMM.dll`'s registered `WHvEmulatorIoPortCallback` or `WHvEmulatorMemoryCallback` and commits read results back to the VCPU's GPRs.
 
 ### `src/ffmpeg_stub.c`
 - BlueStacks spawns `ffmpeg.exe -list_devices true -f dshow -i dummy` every few seconds to enumerate webcams. Under Wine + DXVK, each `ffmpeg.exe` process initializes Vulkan/D3D11 adapters, causing periodic 50–100ms frame-time spikes.

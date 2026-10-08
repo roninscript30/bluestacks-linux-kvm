@@ -21,6 +21,21 @@
       rpcrt4 (init_psfactory) fills the NULL slots of MIDL's delegating
       proxy/stub vtables in place, which faults when they are const data.
 
+  bstpatch.py force-hyperv HD-Player.exe
+      HD-Player.exe only selects BlueStacks' Hyper-V (WHPX) VM path when CPUID
+      leaf 0x40000000 reports "Microsoft Hv", which bare-metal Linux never
+      does. Make that selection unconditional.
+
+  bstpatch.py driverless-fallback BstkRT.dll
+      SUPLib only switches to its (backported) driverless mode when the
+      caller asks for it. Let it fall back whenever the support driver cannot
+      be opened, which under Wine is always.
+
+  bstpatch.py nem-skip-cpuid-probe BstkVMM.dll
+      VirtualBox's NEM probe (nemR3WinInitProbeAndLoad) insists on CPUID
+      saying we run inside a Hyper-V partition. Jump straight to loading
+      WinHvPlatform.dll, whose answers (our KVM bridge) are what matter.
+
   bstpatch.py wine-proxy-vtables FILE
       Wine does not export ObjectStublessClientN / NdrProxyForwardingFunctionN
       (calling them aborts with "unimplemented function"). Instead, rpcrt4
@@ -73,6 +88,17 @@ class PE:
             if va <= rva < va + size:
                 return rva - va + rawptr
         fail(f"RVA {rva:#x} not in any section")
+
+    def rva(self, off):
+        for va, size, rawptr in self.sections:
+            if rawptr <= off < rawptr + size:
+                return off - rawptr + va
+        fail(f"file offset {off:#x} not in any section")
+
+    def rip_target(self, disp_off):
+        """String/data RVA referenced by a rip-relative disp32 at file offset disp_off."""
+        disp = struct.unpack_from("<i", self.data, disp_off)[0]
+        return self.rva(disp_off + 4) + disp
 
     def cstr(self, off):
         return bytes(self.data[off:self.data.index(b"\0", off)])
@@ -196,6 +222,63 @@ def wine_proxy_vtables(data):
                 patched += 1
         p += block
     print(f"proxy vtables: {patched} slots rewritten")
+
+
+def find_unique(data, pattern, what):
+    hits = list(re.finditer(pattern, data, re.S))
+    if len(hits) != 1:
+        fail(f"{what}: expected 1 match, found {len(hits)} (unsupported BlueStacks version?)")
+    return hits[0]
+
+
+def force_hyperv(data):
+    pe = PE(data)
+    # al = (vendor == "Microsoft Hv"); rdx = al ? "hyperv" : "vbox"
+    #   mov al,1 / jmp +2 / xor al,al / lea rcx,"hyperv" / lea rdx,"vbox" / test al,al / cmovne rdx,rcx
+    pattern = rb"\xb0\x01\xeb\x02(\x32\xc0|\xb0\x01)\x48\x8d\x0d....\x48\x8d\x15....\x84\xc0\x48\x0f\x45\xd1"
+    hits = [m for m in re.finditer(pattern, data, re.S)
+            if pe.cstr(pe.off(pe.rip_target(m.start() + 9))) == b"hyperv"
+            and pe.cstr(pe.off(pe.rip_target(m.start() + 16))) == b"vbox"]
+    if len(hits) != 1:
+        fail(f"hypervisor selection: expected 1 match, found {len(hits)} (unsupported BlueStacks version?)")
+    o = hits[0].start(1)
+    already = data[o:o + 2] == b"\xb0\x01"
+    data[o:o + 2] = b"\xb0\x01"  # xor al,al -> mov al,1
+    print(f"hypervisor selection: {'already forced' if already else 'forced'} to hyperv")
+
+
+def driverless_fallback(data):
+    if b"Switching to driverless mode" not in data:
+        fail("no driverless mode in this SUPLib (unsupported BlueStacks version?)")
+    # test sil,0xc (SUPR3INIT_F_DRIVERLESS_MASK) / je skip / cmp ebx,-1
+    m = find_unique(data, rb"\x40\xf6\xc6\x0c(\x0f\x84....|\x66\x0f\x1f\x44\x00\x00)\x83\xfb\xff", "driverless check")
+    o = m.start(1)
+    already = data[o] == 0x66
+    data[o:o + 6] = b"\x66\x0f\x1f\x44\x00\x00"  # je -> 6-byte nop
+    print(f"driverless fallback: {'already enabled' if already else 'enabled'}")
+
+
+def nem_skip_cpuid_probe(data):
+    if b"Not in a hypervisor partition" not in data:
+        fail("no NEM CPUID probe found (unsupported BlueStacks version?)")
+    # cmp r9d,0x40000005 / jae <load WinHvPlatform.dll>: the last check of the probe
+    m = find_unique(data, rb"\x41\x81\xf9\x05\x00\x00\x40\x73(.)", "hypervisor leaf range check")
+    target = m.end() + struct.unpack("b", m.group(1))[0]
+    window = data[max(0, m.start() - 0x200):m.start()]
+    base = max(0, m.start() - 0x200)
+    # xor eax,eax / xor ecx,ecx / cpuid / dec eax: the first check of the probe
+    start = window.rfind(b"\x33\xc0\x33\xc9\x0f\xa2\xff\xc8")
+    if start == -1:
+        for i in range(len(window) - 7):
+            if window[i:i + 3] == b"\x33\xdb\xe9" and \
+                    base + i + 7 + struct.unpack_from("<i", window, i + 3)[0] == target:
+                print("NEM CPUID probe: already skipped")
+                return
+        fail("NEM CPUID probe start not found (unsupported BlueStacks version?)")
+    o = base + start
+    # xor ebx,ebx (the loader loop below indexes with rbx) / jmp target / nop
+    data[o:o + 8] = b"\x33\xdb\xe9" + struct.pack("<i", target - (o + 7)) + b"\x90"
+    print("NEM CPUID probe: skipped")
 
 
 def writable_section(data, section):
@@ -336,12 +419,16 @@ def main():
         "rename-import-func": (rename_import_func, 3),
         "writable-section": (writable_section, 1),
         "wine-proxy-vtables": (wine_proxy_vtables, 0),
+        "force-hyperv": (force_hyperv, 0),
+        "driverless-fallback": (driverless_fallback, 0),
+        "nem-skip-cpuid-probe": (nem_skip_cpuid_probe, 0),
     }
     if len(sys.argv) < 3 or sys.argv[1] not in commands \
             or len(sys.argv) != 3 + commands[sys.argv[1]][1]:
         fail("usage: bstpatch.py {stub-method FILE Namespace.Type Method"
              " | rename-import FILE OLD.dll NEW.dll | rename-import-func FILE DLL OLD NEW"
-             " | writable-section FILE SECTION | wine-proxy-vtables FILE}")
+             " | writable-section FILE SECTION | wine-proxy-vtables FILE | force-hyperv FILE"
+             " | driverless-fallback FILE | nem-skip-cpuid-probe FILE}")
     func = commands[sys.argv[1]][0]
     path = sys.argv[2]
     with open(path, "rb") as f:

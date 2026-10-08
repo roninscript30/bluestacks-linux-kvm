@@ -113,6 +113,7 @@ mkdir -p "${SYS32_DIR}"
 cp -f "${DIST_DIR}/WinHvPlatform.dll" "${SYS32_DIR}/WinHvPlatform.dll"
 cp -f "${DIST_DIR}/WinHvEmulation.dll" "${SYS32_DIR}/WinHvEmulation.dll"
 cp -f "${DIST_DIR}/vid.dll" "${SYS32_DIR}/vid.dll"
+cp -f "${DIST_DIR}/winhv_kvm.so" "${SYS32_DIR}/winhv_kvm.so"
 cp -f "${DIST_DIR}/bstdns.dll" "${SYS32_DIR}/bstdns.dll"
 
 # 6. If BlueStacks is not installed yet, install it from the official full installer.
@@ -254,11 +255,21 @@ if [[ ! -f "${HD_PLAYER}" ]]; then
     install_bluestacks
 fi
 
+# Stop any running BlueStacks / VirtualBox COM daemon: the binaries below are rewritten in
+# place (Wine maps them), and .bstk/.conf edits must not be overwritten from memory
+pkill -9 -f "HD-Player.exe|BstkSVC.exe|HD-MultiInstanceManager.exe|HD-Adb.exe|HD-GLCheck.exe" 2>/dev/null || true
+wineserver -k 2>/dev/null || true
+
 # Re-apply the Wine fixes to the installed binaries (no-op if already patched; also
 # upgrades installs made by older versions of this script, or replaced by a BlueStacks update)
-pkill -9 -f 'BstkSVC\.exe' 2>/dev/null || true
 echo "[*] Applying Wine fixes to installed BlueStacks binaries..."
 patch_bluestacks_binaries "${BST_PROG_DIR}"
+# Route the VM through WHPX (the KVM bridge) instead of the BlueStacks kernel driver,
+# which cannot run under Wine: select the Hyper-V path, let SUPLib run driverless,
+# and skip VirtualBox's "are we inside a Hyper-V partition" CPUID probe.
+"${BSTPATCH[@]}" force-hyperv "${BST_PROG_DIR}/HD-Player.exe"
+"${BSTPATCH[@]}" driverless-fallback "${BST_PROG_DIR}/BstkRT.dll"
+"${BSTPATCH[@]}" nem-skip-cpuid-probe "${BST_PROG_DIR}/BstkVMM.dll"
 
 # HD-Player.exe crashes when the BlueStacksDrv_nxt service fails to start (the real
 # driver needs VMX root mode) and refuses to boot when it is disabled, so point the
@@ -280,9 +291,6 @@ if [[ -d "${BST_PROG_DIR}" ]]; then
 fi
 
 # 8. Auto-detect all instances in bluestacks.conf & apply 240 FPS + ROG 2 + AGA/GL config
-# Stop any running BlueStacks / VirtualBox COM daemon first so .bstk edits are not overwritten in memory
-pkill -9 -f "HD-Player.exe|BstkSVC.exe|HD-MultiInstanceManager.exe|HD-Adb.exe|HD-GLCheck.exe" 2>/dev/null || true
-wineserver -k 2>/dev/null || true
 
 set_conf_key() {
     local key="$1"

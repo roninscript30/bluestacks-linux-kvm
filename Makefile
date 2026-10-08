@@ -18,4 +18,4 @@ status:
 	@./bluestacks-kvm status
 
 clean:
-	rm -rf dist/*.dll dist/*.exe dist/*.lib dist/*.obj
+	rm -rf dist/*.dll dist/*.exe dist/*.so dist/*.sys dist/*.lib dist/*.obj
