@@ -41,9 +41,15 @@ Implements Microsoft's instruction emulator API (`WHvEmulatorCreateEmulator`, `W
 - BlueStacks spawns `ffmpeg.exe -list_devices true -f dshow -i dummy` every few seconds to enumerate webcams. Under Wine + DXVK, each `ffmpeg.exe` process initializes Vulkan/D3D11 adapters, causing periodic 50–100ms frame-time spikes.
 - `ffmpeg_stub.c` compiles into a tiny 3KB `ffmpeg.exe` binary that immediately exits with `0`, completely eliminating camera-polling stutters.
 
+### `src/bstdns.c`
+- `BstkSVC.exe` (the VirtualBox COM server) calls `DnsQueryConfig(DnsConfigDnsServerList, DNS_CONFIG_FLAG_ALLOC, ...)` with an 8-byte buffer and expects a `LocalAlloc`'d `IP4_ARRAY` pointer back. Wine ignores the flag and writes the array itself whenever it fits (exactly one IPv4 DNS server), so `BstkSVC.exe` crashes while creating the `VirtualBox` object.
+- `bstdns.dll` exports a `DnsQueryConfig` that implements the ALLOC flag on top of Wine's `dnsapi.dll`; `install.sh` renames `BstkSVC.exe`'s `DNSAPI.dll` import to `bstdns.dll`.
+
 ### `scripts/`
-- **[`scripts/build.sh`](../scripts/build.sh)**: Compiles `WinHvPlatform.dll`, `WinHvEmulation.dll`, `vid.dll`, and `ffmpeg.exe` using `clang -target x86_64-pc-windows-gnu -fuse-ld=lld -O2`.
-- **[`scripts/install.sh`](../scripts/install.sh)**: Auto-detects dependencies, `/dev/kvm` permissions, Wine prefixes, `HD-Player.exe`, and `bluestacks.conf` instances, then applies all 240 FPS / ROG 2 / PGA OpenGL patches.
+- **[`scripts/common.sh`](../scripts/common.sh)**: Shared paths sourced by every script. BlueStacks lives in the dedicated `~/.bluestacks` prefix (`BLUESTACKS_PREFIX` overrides it).
+- **[`scripts/build.sh`](../scripts/build.sh)**: Compiles `WinHvPlatform.dll`, `WinHvEmulation.dll`, `vid.dll`, `bstdns.dll`, and `ffmpeg.exe` using `clang -target x86_64-pc-windows-gnu -fuse-ld=lld -O2`.
+- **[`scripts/install.sh`](../scripts/install.sh)**: Checks dependencies and `/dev/kvm` permissions, creates the prefix, and installs BlueStacks: it reads the version, CDN path and Android image from the bluestacks.com web installer, downloads the full installer + image, patches them for Wine (see the README's *Wine Compatibility Fixes*) and runs the full installer silently. It then applies all 240 FPS / ROG 2 / PGA OpenGL patches to every `bluestacks.conf` instance.
+- **[`scripts/bstpatch.py`](../scripts/bstpatch.py)**: Standard-library-only PE/.NET patcher used by `install.sh` (stub a void .NET method, rename an import DLL or function, mark a section writable).
 - **[`scripts/launch.sh`](../scripts/launch.sh)**: Switches the host CPU power profile to `performance`, sets NVIDIA PRIME / Mesa glthread environment variables, spawns `guest-tune.sh` in the background, and launches `HD-Player.exe`.
 - **[`scripts/guest-tune.sh`](../scripts/guest-tune.sh)**: Connects to the running Android VM via `HD-Adb.exe` (using a base64-encoded single-line payload) and configures the guest Linux kernel and SurfaceFlinger for 240 FPS.
 

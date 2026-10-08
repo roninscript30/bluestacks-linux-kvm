@@ -23,6 +23,14 @@ echo "[*] Building vid.dll..."
 "${CC}" --target="${TARGET}" "${CFLAGS[@]}" -shared -Wl,-e,DllMain \
     "${SRC_DIR}/vid.c" -o "${DIST_DIR}/vid.dll"
 
+echo "[*] Building bstdns.dll (DnsQueryConfig shim for BstkSVC.exe)..."
+"${CC}" --target="${TARGET}" "${CFLAGS[@]}" -shared -Wl,-e,_DllMainCRTStartup \
+    "${SRC_DIR}/bstdns.c" -o "${DIST_DIR}/bstdns.dll" -lkernel32
+
+echo "[*] Building bstkdrv_stub.sys (no-op BlueStacksDrv_nxt service driver)..."
+"${CC}" --target="${TARGET}" "${CFLAGS[@]}" -shared -Wl,--subsystem,native -Wl,-e,DriverEntry \
+    "${SRC_DIR}/bstkdrv_stub.c" -o "${DIST_DIR}/bstkdrv_stub.sys"
+
 echo "[*] Building ffmpeg.exe stub..."
 "${CC}" --target="${TARGET}" "${CFLAGS[@]}" -Wl,-e,mainCRTStartup -Wl,--subsystem,console \
     "${SRC_DIR}/ffmpeg_stub.c" -o "${DIST_DIR}/ffmpeg.exe"

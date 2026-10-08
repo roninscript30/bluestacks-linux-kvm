@@ -2,23 +2,16 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/common.sh
+source "${ROOT_DIR}/scripts/common.sh"
 
-# 1. Auto-detect WINEPREFIX containing BlueStacks 5 if not explicitly set
-if [[ -z "${WINEPREFIX:-}" ]]; then
-    if [[ -f "${HOME}/.wine/drive_c/Program Files/BlueStacks_nxt/HD-Player.exe" ]]; then
-        export WINEPREFIX="${HOME}/.wine"
-    else
-        FOUND_EXE="$(find "${HOME}" -maxdepth 5 -name "HD-Player.exe" 2>/dev/null | head -n 1 || true)"
-        if [[ -n "${FOUND_EXE}" ]]; then
-            export WINEPREFIX="$(echo "${FOUND_EXE}" | sed 's|/drive_c/.*||')"
-        else
-            export WINEPREFIX="${HOME}/.wine"
-        fi
-    fi
+# 1. Make sure BlueStacks is installed in the dedicated prefix
+if [[ ! -f "${HD_PLAYER}" ]]; then
+    echo "[!] BlueStacks 5 is not installed in ${WINEPREFIX}. Run ./install.sh first."
+    exit 1
 fi
 
 # 2. Auto-detect instance name from bluestacks.conf if not explicitly set
-BST_CONF="${WINEPREFIX}/drive_c/ProgramData/BlueStacks_nxt/bluestacks.conf"
 if [[ -z "${INSTANCE:-}" ]]; then
     if [[ -f "${BST_CONF}" ]]; then
         if grep -q '^bst\.instance\.Nougat32\.' "${BST_CONF}" 2>/dev/null; then
@@ -39,7 +32,7 @@ rm -f /tmp/whv_kvm.log
 # 4. Run background guest tuner once Android boots
 (
     sleep 14
-    WINEPREFIX="${WINEPREFIX}" "${ROOT_DIR}/scripts/guest-tune.sh" >/dev/null 2>&1 || true
+    "${ROOT_DIR}/scripts/guest-tune.sh" >/dev/null 2>&1 || true
 ) &
 
 # 5. Auto-detect NVIDIA PRIME offload vs AMD/Intel Mesa
