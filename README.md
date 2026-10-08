@@ -12,7 +12,7 @@ BlueStacks 5 is a Windows-only Android emulator designed for gaming (`HD-Player.
 Wine does not implement `WinHvPlatform.dll` or `WinHvEmulation.dll`, so running BlueStacks 5 on Linux normally fails immediately at hypervisor initialization.
 
 I built this project **for fun** to see if we could:
-1. **Bridge Microsoft's WHPX hypervisor API directly to Linux `/dev/kvm`** inside a single hybrid Wine/Linux C library (`WinHvPlatform.c`) compiled with `clang -target x86_64-pc-windows-gnu` that executes direct Linux x86\_64 `syscall`/`ioctl` instructions (`KVM_CREATE_VM`, `KVM_SET_USER_MEMORY_REGION`, `KVM_CREATE_VCPU`, `KVM_RUN`).
+1. **Bridge Microsoft's WHPX hypervisor API directly to Linux `/dev/kvm`**: a thin Windows `WinHvPlatform.dll` forwards every call through a Wine unix call to a Linux shared library (`winhv_kvm.so`) that drives KVM (`KVM_CREATE_VM`, `KVM_SET_USER_MEMORY_REGION`, `KVM_CREATE_VCPU`, `KVM_RUN`).
 2. **Reverse-engineer `BstkVMM.dll`'s internal VirtualBox `VMCPU` structures** so we could bypass expensive VM-exit roundtrips and emulate hot xAPIC / MMIO / PIO / MSR paths in-place inside the bridge.
 3. **Eliminate every host & guest bottleneck** (ACPI PM-timer exits, xAPIC EOI storms, DXVK `ffmpeg.exe` camera polling, Android `pagefusion`, SurfaceFlinger VSync caps, and laptop EC power-saver throttling) to reach **unlocked high-FPS (120–240 FPS)** gaming on Linux.
 
@@ -20,21 +20,25 @@ I built this project **for fun** to see if we could:
 
 ## Quick Start (One-Line Command)
 
-Clone the repository, make the installer executable, and run `./install.sh` in a single command:
+Download the BlueStacks 5 installer from [bluestacks.com](https://www.bluestacks.com) into `~/Downloads` (the Android version you pick there, e.g. *Android 11 64-bit*, is encoded in the file name and honored). Then clone the repository and run `./install.sh`:
 
 ```bash
 git clone https://github.com/marudhu/bluestacks-linux-kvm.git && cd bluestacks-linux-kvm && chmod +x install.sh && ./install.sh
 ```
 
+Options: `--installer PATH` (use a specific `BlueStacksInstaller*.exe` instead of the newest one in `~/Downloads`), `--image NAME` (`Nougat32`, `Nougat64`, `Pie64`, `Rvc64`, `Tiramisu64`; overrides the one from the file name), `--no-launch`.
+
+BlueStacks lives in its own Wine prefix, **`~/.bluestacks`** (set `BLUESTACKS_PREFIX` to use another path; an ambient `WINEPREFIX` is ignored on purpose). To start over, delete that directory and re-run `./install.sh`.
+
 ### What `./install.sh` Does Automatically:
-1. **Dependency Check**: Detects and installs `wine`, `clang`, `lld`, and MinGW headers (`apt`, `dnf`, or `pacman`) if missing.
+1. **Dependency Check**: Detects and installs `wine`, `clang`, `lld`, MinGW headers, `7z`, `binutils`, `python3` and `curl` (`apt`, `dnf`, or `pacman`) if missing.
 2. **KVM Permissions**: Verifies `/dev/kvm` exists and grants read/write access to your user.
-3. **Builds the Bridge**: Compiles `dist/WinHvPlatform.dll`, `dist/WinHvEmulation.dll`, `dist/vid.dll`, and the no-op `dist/ffmpeg.exe` stub from `src/`.
-4. **Auto-Detects BlueStacks**: Finds your existing `HD-Player.exe` across Wine prefixes (or runs `BlueStacksInstaller*.exe` from `~/Downloads` if not installed yet) and installs the WHPX-to-KVM DLLs into `system32`.
+3. **Builds the Bridge**: Creates the `~/.bluestacks` prefix if needed and compiles `dist/WinHvPlatform.dll`, `dist/WinHvEmulation.dll`, `dist/vid.dll`, the `dist/bstdns.dll` DNS shim, and the no-op `dist/ffmpeg.exe` stub from `src/`, installing the DLLs into the prefix's `system32`.
+4. **Installs BlueStacks**: The `BlueStacksInstaller*.exe` from bluestacks.com is only a .NET web installer. The script reads the BlueStacks version and Android image from it, downloads the same full installer and image from the BlueStacks CDN (cached in `~/.cache/bluestacks-linux-kvm`, or `~/.bluestacks/cache` if that is not writable; the image is MD5-checked), applies the [Wine compatibility fixes](#wine-compatibility-fixes) and runs the full installer silently. On failure it prints the paths of the Wine log (`~/.bluestacks/logs/`) and the BlueStacks installer logs.
 5. **Applies High-FPS & GPU Configs**: Patches `bluestacks.conf` across all detected Android instances (`Nougat32`, `Pie64`, `Rvc64`, etc.) with:
    - `max_fps="240"`, `enable_high_fps="1"`, `enable_vsync="0"`
    - ASUS ROG 2 (`rogt` / `ASUS_Z01QD`) device profile to unlock 90/120/240 FPS in games
-   - `graphics_engine="pga"`, `graphics_renderer="gl"`, `prefer_dedicated_gpu="1"`, `astc_decoding_mode="disabled"`
+   - `graphics_engine="aga"`, `graphics_renderer="gl"`, `prefer_dedicated_gpu="1"`, `astc_decoding_mode="disabled"`
    - Root + ADB enabled for live guest kernel tuning
 6. **Launches Smoothly**: Sets the host CPU governor to `performance`, offloads rendering to your dedicated GPU, tunes the Android guest kernel (`clocksource=tsc`, `debug.egl.swapinterval=0`, `bst.fps=240`), and starts BlueStacks 5.
 
@@ -47,7 +51,8 @@ flowchart LR
     subgraph Wine ["Wine Userspace (Windows PE x86_64)"]
         HDP["HD-Player.exe<br/>(Qt UI + PGA OpenGL Host)"]
         VMM["BstkVMM.dll<br/>(VirtualBox NEM Hypervisor)"]
-        WHV["WinHvPlatform.dll / WinHvEmulation.dll<br/>(Our Hybrid PE/Linux Bridge)"]
+        WHV["WinHvPlatform.dll / WinHvEmulation.dll<br/>(Our PE bridge DLLs)"]
+        KVMSO["winhv_kvm.so<br/>(Our Linux side, same process)"]
     end
 
     subgraph Linux ["Linux Kernel & Hardware"]
@@ -58,11 +63,12 @@ flowchart LR
     HDP -->|"PGA Virgl / OpenGL IPC"| GPU
     HDP -->|"Loads VMM"| VMM
     VMM -->|"WHvRunVirtualProcessor()"| WHV
-    WHV -->|"Direct Linux syscall(ioctl) + xAPIC Fast-Path"| KVM
+    WHV -->|"Wine unix call"| KVMSO
+    KVMSO -->|"ioctl(KVM_RUN) + xAPIC Fast-Path"| KVM
 ```
 
-1. **PE-to-Linux Syscall Bridge (`src/WinHvPlatform.c`)**:
-   Compiled as a Windows 64-bit PE DLL (`__attribute__((ms_abi))`), yet talks directly to the Linux kernel via inline `syscall` assembly (`__sys1`, `__sys3`, `__sys6`). No `ntdll` Unix-call patching or custom Wine builds required.
+1. **PE-to-Linux Unix-Call Bridge (`src/WinHvPlatform.c` + `src/winhv_kvm.c`)**:
+   Wine traps `syscall` instructions executed from Windows code (syscall user dispatch), so the PE DLLs cannot talk to the kernel themselves. `WinHvPlatform.dll` loads `winhv_kvm.so` from its own directory with `__wine_load_unix_lib` and forwards each `WHv*` call through `__wine_unix_call_dispatcher` (both from the installed Wine's `libwinecrt0.a`), exactly how Wine's own DLLs reach Unix code. No custom Wine build is needed, only Wine's development files (included in Arch's `wine`).
 2. **In-Kernel `KVM_RUN` + In-Place x86 Decoder**:
    Maps guest RAM slots via `KVM_SET_USER_MEMORY_REGION`, translates 54 WHPX registers (`GDT`, `IDT`, `CR0..CR4`, `EFER`, `XCR0`, `APIC_BASE`, `TSC`, segment caches) to KVM structures, and decodes MMIO/PIO instructions (`MOV`, `MOVZX`, `MOVSX`, `OR`, `AND`, `XOR`, `ADD`, `SUB`, `CMP`, `TEST`, `XCHG`, `STOS`, `MOVS`, `OUT`, `IN`) directly inside the bridge without waking `WinHvEmulation.dll`.
 3. **`BstkVMM.dll` Internal `VMCPU` Fast-Paths**:
@@ -73,6 +79,30 @@ flowchart LR
 
 ---
 
+## Wine Compatibility Fixes
+
+The stock BlueStacks installer rolls back ("installation failed") under Wine. `scripts/install.sh` stages the full installer in the prefix and fixes these, all applied with [`scripts/bstpatch.py`](scripts/bstpatch.py) (locates methods/imports by name, no hard-coded offsets):
+
+| Problem under Wine | Fix |
+| :--- | :--- |
+| Wine Mono resolves field types eagerly, so `ImageInstaller` fails to load `BstkTypeLib` (only shipped inside `PF.zip`) | `BstkTypeLib.dll` is copied next to the installer |
+| `ServiceController.ServiceHandle` is unimplemented in Wine Mono (`ServiceManager.SetServicePermissions`) | The DACL-setting method is stubbed in the installer's `HD-Common.dll` |
+| Wine's `DnsQueryConfig` ignores `DNS_CONFIG_FLAG_ALLOC`, crashing `BstkSVC.exe` on hosts with exactly one DNS server | `BstkSVC.exe` imports [`bstdns.dll`](src/bstdns.c), which implements the flag on top of Wine's `dnsapi` |
+| Wine's `rpcrt4` writes MIDL's delegated proxy/stub vtables in place (read-only in `BstkProxyStub.dll`) and lacks `NdrStubCall3` (NDR64) | `.rdata` is made writable and `NdrStubCall3` is bound to `NdrStubCall2` (NDR20 format strings are present) |
+| Wine exports no `ObjectStublessClientN` / `NdrProxyForwardingFunctionN` (`HD-Player.exe` aborts with "unimplemented function") | `BstkProxyStub.dll` vtable slots pointing at them are set to `-1` / `NULL`, which Wine's `rpcrt4` fills with its own thunks |
+| The real `BstkDrv_nxt.sys` cannot start under Wine (it needs VMX root mode), and `HD-Player.exe` crashes when the `BlueStacksDrv_nxt` service fails to start | The service runs [`bstkdrv_stub.sys`](src/bstkdrv_stub.c), a no-op driver that starts cleanly and creates no device |
+| `HD-Player.exe` only uses its Hyper-V (WHPX) VM path when CPUID leaf `0x40000000` reports `Microsoft Hv`, never true on bare-metal Linux | `bstpatch.py force-hyperv` makes the selection unconditional |
+| VirtualBox's SUPLib refuses to start without its support driver (`VERR_VM_DRIVER_NOT_INSTALLED`) | `bstpatch.py driverless-fallback` lets `BstkRT.dll` use its backported driverless mode, so `BstkVMM.dll` falls back from HM to NEM (WHPX) |
+| VirtualBox's NEM probe requires CPUID to report a Hyper-V partition (`Not in a hypervisor partition (HVP=0)`) | `bstpatch.py nem-skip-cpuid-probe` jumps straight to loading `WinHvPlatform.dll` |
+| `BstkVMM.dll` hooks `vid.dll`'s `NtDeviceIoControlFile` import | The [`vid.dll`](src/vid.c) stub imports it |
+| A 64-bit Android kernel enables x2APIC (advertised by the host CPUID), but `BstkVMM.dll`'s APIC is xAPIC-only under WHPX, so the guest triple-faults | [`winhv_kvm.c`](src/winhv_kvm.c) hides x2APIC from the guest CPUID |
+
+These fixes are re-applied (idempotently) every time `./install.sh` runs, so re-running it repairs an existing install.
+
+Tested with BlueStacks 5.22.280.1025 (Android 11 / `Rvc64`) on Wine 11.19 (Arch Linux): Android reaches the home screen about 12 seconds after launch.
+
+---
+
 ## Repository Structure & Documentation
 
 ```text
@@ -80,15 +110,19 @@ bluestacks-linux-kvm/
 ├── install.sh                 # One-step auto-installer, configurator & launcher
 ├── bluestacks-kvm             # CLI tool: {build|install|run|tune|status}
 ├── src/
-│   ├── WinHvPlatform.c        # WHPX -> Linux /dev/kvm hypervisor bridge + xAPIC/PIO fast-paths
-│   ├── WinHvPlatform.def      # Export table for WinHvPlatform.dll
+│   ├── WinHvPlatform.c        # WinHvPlatform.dll: forwards WHv* calls to winhv_kvm.so (Wine unix calls)
+│   ├── winhv_kvm.c            # winhv_kvm.so: WHPX -> Linux /dev/kvm bridge + xAPIC/PIO fast-paths
+│   ├── winhv_unixlib.h        # Interface between the PE DLLs and winhv_kvm.so
 │   ├── WinHvEmulation.c       # WHvEmulatorTryIoEmulation / MmIoEmulation implementation
-│   ├── WinHvEmulation.def     # Export table for WinHvEmulation.dll
-│   ├── vid.def                # Export table for vid.dll
+│   ├── vid.c                  # vid.dll stub (imported by BstkVMM.dll's NEM backend)
+│   ├── bstdns.c               # DnsQueryConfig shim for BstkSVC.exe (Wine DNS_CONFIG_FLAG_ALLOC bug)
+│   ├── bstkdrv_stub.c         # No-op stand-in for the BlueStacksDrv_nxt kernel driver
 │   └── ffmpeg_stub.c          # Zero-overhead no-op ffmpeg.exe replacement
 ├── scripts/
+│   ├── common.sh              # Shared paths (~/.bluestacks prefix, BlueStacks dirs)
 │   ├── build.sh               # Compiles DLLs & stub into dist/
-│   ├── install.sh             # Auto-detects Wine, BlueStacks, KVM & applies 240 FPS config
+│   ├── bstpatch.py            # Wine compatibility patches for the BlueStacks installer binaries
+│   ├── install.sh             # Creates the prefix, installs BlueStacks & applies 240 FPS config
 │   ├── launch.sh              # Launches HD-Player.exe with GPU offload + host performance mode
 │   └── guest-tune.sh          # Live Android guest kernel & SurfaceFlinger 240 FPS tuner
 └── docs/

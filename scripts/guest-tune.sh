@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/common.sh
+source "${ROOT_DIR}/scripts/common.sh"
+
 ADB_ADDR="${ADB_ADDR:-127.0.0.1:5555}"
-WINEPREFIX="${WINEPREFIX:-${HOME}/.wine}"
-HD_ADB="${WINEPREFIX}/drive_c/Program Files/BlueStacks_nxt/HD-Adb.exe"
+HD_ADB="${BST_PROG_DIR}/HD-Adb.exe"
 
 run_adb() {
     if command -v adb >/dev/null 2>&1; then
         adb "$@"
     else
-        WINEDEBUG=-all WINEPREFIX="${WINEPREFIX}" wine "${HD_ADB}" "$@" 2>/dev/null | tr -d '\r'
+        WINEDEBUG=-all wine "${HD_ADB}" "$@" 2>/dev/null | tr -d '\r'
     fi
 }
 
