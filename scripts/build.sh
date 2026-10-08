@@ -21,7 +21,7 @@ echo "[*] Building WinHvEmulation.dll..."
 
 echo "[*] Building vid.dll..."
 "${CC}" --target="${TARGET}" "${CFLAGS[@]}" -shared -Wl,-e,DllMain \
-    "${SRC_DIR}/vid.c" -o "${DIST_DIR}/vid.dll"
+    "${SRC_DIR}/vid.c" -o "${DIST_DIR}/vid.dll" -lntdll
 
 echo "[*] Building bstdns.dll (DnsQueryConfig shim for BstkSVC.exe)..."
 "${CC}" --target="${TARGET}" "${CFLAGS[@]}" -shared -Wl,-e,_DllMainCRTStartup \
