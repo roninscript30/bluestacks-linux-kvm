@@ -1819,6 +1819,70 @@ run_again:
                         } else if (off == 0x0e0U) {
                             *(uint32_t *)(xapic + 0x0e0U) = val | 0x0fffffffU;
                             goto run_again;
+                        } else if (off == 0x300U) {
+                            uint8_t vector = (uint8_t)(val & 0xffU);
+                            uint8_t delivery_mode = (uint8_t)((val >> 8) & 0x7U);
+                            uint8_t shorthand = (uint8_t)((val >> 18) & 0x3U);
+                            /* Only fast-path standard Fixed SMP IPIs when all VCPUs are online */
+                            if (delivery_mode == 0 && vector >= 0x20U &&
+                                part->processor_count > 1 &&
+                                part->vcpus[1].created && part->vcpus[1].vbox_vcpu != NULL) {
+                                uint32_t icr_hi = *(const uint32_t *)(xapic + 0x310U);
+                                uint8_t dest_id = (uint8_t)(icr_hi >> 24);
+                                uint32_t irr_word = (uint32_t)vector / 32U;
+                                uint32_t irr_bit = (uint32_t)vector % 32U;
+                                uint32_t irr_mask = (1U << irr_bit);
+
+                                uint32_t proc_cnt = part->processor_count;
+                                if (proc_cnt > MAX_VCPUS) proc_cnt = MAX_VCPUS;
+
+                                for (uint32_t target_idx = 0; target_idx < proc_cnt; target_idx++) {
+                                    if (!part->vcpus[target_idx].created) continue;
+
+                                    int targeted = 0;
+                                    if (shorthand == 1) { /* Self */
+                                        targeted = (target_idx == VpIndex);
+                                    } else if (shorthand == 2) { /* All including self */
+                                        targeted = 1;
+                                    } else if (shorthand == 3) { /* All excluding self */
+                                        targeted = (target_idx != VpIndex);
+                                    } else { /* No shorthand (0) */
+                                        targeted = (dest_id == 0xffU || dest_id == target_idx);
+                                    }
+
+                                    if (!targeted) continue;
+
+                                    uint8_t *tgt_pVCpu = (uint8_t *)part->vcpus[target_idx].vbox_vcpu;
+                                    if (tgt_pVCpu != NULL) {
+                                        uint8_t *tgt_xapic = *(uint8_t * const *)(tgt_pVCpu + 0xfd20);
+                                        if (tgt_xapic != NULL) {
+                                            __sync_fetch_and_or((uint32_t *)(tgt_xapic + 0x200U + irr_word * 0x10U), irr_mask);
+                                            uint8_t *tgt_pib = *(uint8_t * const *)(tgt_pVCpu + 0xfd48);
+                                            if (tgt_pib != NULL) {
+                                                __sync_fetch_and_or((uint32_t *)(tgt_pib + irr_word * 4U), irr_mask);
+                                                __sync_lock_test_and_set((uint32_t *)(tgt_pib + 0x20U), 0x80000000U);
+                                            }
+                                            __sync_fetch_and_or((uint32_t *)tgt_pVCpu, (1U << 8));
+                                        }
+                                    }
+
+                                    if (target_idx != VpIndex) {
+                                        struct whv_vcpu *tvcpu = &part->vcpus[target_idx];
+                                        tvcpu->cancel_requested = 1;
+                                        if (tvcpu->run) tvcpu->run->immediate_exit = 1;
+                                        __sync_synchronize();
+                                        int ttid = tvcpu->tid;
+                                        int ttgid = tvcpu->tgid;
+                                        if (tvcpu->in_run && ttid > 0 && ttgid > 0) {
+                                            sys_tgkill(ttgid, ttid, 23 /* SIGURG */);
+                                        }
+                                    }
+                                }
+
+                                (*(uint64_t *)(pVCpu + 0x102d0))++;
+                                *(uint32_t *)(xapic + 0x300U) = val & ~0x1000U;
+                                goto run_again;
+                            }
                         } else if (off == 0x080U && (val & 0xffffff00U) == 0U) {
                             uint8_t new_tpr = (uint8_t)val;
                             uint8_t old_tpr = xapic[0x80U];

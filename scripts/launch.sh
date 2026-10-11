@@ -47,6 +47,7 @@ GPU_ENV=(
     __GL_THREADED_OPTIMIZATIONS=1
     __GL_SYNC_TO_VBLANK=0
     __GL_MaxFramesAllowed=1
+    __GL_YIELD="NOTHING"
     vblank_mode=0
     mesa_glthread=true
 )
